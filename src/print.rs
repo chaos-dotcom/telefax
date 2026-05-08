@@ -10,43 +10,51 @@ pub fn resize_image(image_bytes: &[u8], config: &Config) -> Result<(Vec<u8>, Str
     let img = image::load_from_memory(image_bytes).context("Failed to load image from memory")?;
     info!("[resize_image] Loaded | width={} height={} color={:?}", img.width(), img.height(), img.color());
 
-    let resized = if img.width() > config.label_width_px || img.height() > config.label_height_px {
+    // Thumbnail if the image is larger than the label, otherwise keep original size
+    let thumb = if img.width() > config.label_width_px || img.height() > config.label_height_px {
         info!("[resize_image] Image exceeds label ({}x{}), thumbnailing to {}x{}",
             img.width(), img.height(), config.label_width_px, config.label_height_px);
         img.thumbnail(config.label_width_px, config.label_height_px)
     } else {
-        info!("[resize_image] Image fits label, no resize needed");
+        info!("[resize_image] Image fits label, using original size");
         img
     };
 
+    // Create a white background at EXACT label dimensions and center the image.
+    // This prevents CUPS / DYMO drivers from paginating or padding with blank
+    // labels when the source image is smaller than the label.
+    let bg_width = config.label_width_px;
+    let bg_height = config.label_height_px;
+    info!("[resize_image] Pasting onto {}x{} white background", bg_width, bg_height);
+
+    let paste_x = ((bg_width as i64 - thumb.width() as i64) / 2).max(0) as u32;
+    let paste_y = ((bg_height as i64 - thumb.height() as i64) / 2).max(0) as u32;
+
     let use_png = matches!(
-        resized.color(),
+        thumb.color(),
         image::ColorType::Rgba8
             | image::ColorType::Rgba16
             | image::ColorType::Rgba32F
             | image::ColorType::La8
             | image::ColorType::La16
     );
-    info!("[resize_image] Output format | use_png={} color={:?}", use_png, resized.color());
+    info!("[resize_image] Output format | use_png={} thumb_color={:?}", use_png, thumb.color());
 
     let mut output_buffer = Vec::new();
     let format = if use_png {
-        resized.write_to(
-            &mut Cursor::new(&mut output_buffer),
-            ImageFormat::Png,
-        )?;
+        let mut background = image::RgbaImage::from_pixel(bg_width, bg_height, image::Rgba([255, 255, 255, 255]));
+        image::imageops::overlay(&mut background, &thumb.to_rgba8(), paste_x as i64, paste_y as i64);
+        background.write_to(&mut Cursor::new(&mut output_buffer), ImageFormat::Png)?;
         "png".to_string()
     } else {
-        // Convert to RGB8 for JPEG to avoid issues with grayscale or other modes
-        let rgb_img = resized.to_rgb8();
-        rgb_img.write_to(
-            &mut Cursor::new(&mut output_buffer),
-            ImageFormat::Jpeg,
-        )?;
+        let mut background = image::RgbImage::from_pixel(bg_width, bg_height, image::Rgb([255, 255, 255]));
+        image::imageops::overlay(&mut background, &thumb.to_rgb8(), paste_x as i64, paste_y as i64);
+        background.write_to(&mut Cursor::new(&mut output_buffer), ImageFormat::Jpeg)?;
         "jpeg".to_string()
     };
 
-    info!("[resize_image] Done | format={} output_bytes={}", format, output_buffer.len());
+    info!("[resize_image] Done | format={} output_bytes={} exact_dims={}x{}",
+        format, output_buffer.len(), bg_width, bg_height);
     Ok((output_buffer, format))
 }
 
@@ -76,8 +84,10 @@ pub fn build_lp_args(
     let media_option = format!("media=Custom.{}x{}in", width_str, height_str);
     args.push("-o".to_string());
     args.push(media_option);
+    // scaling=100 tells CUPS to print at 100% — no pagination, no blank pages.
+    // The image is already exactly label dimensions, so this is the right choice.
     args.push("-o".to_string());
-    args.push("fit-to-page".to_string());
+    args.push("scaling=100".to_string());
     args.push(temp_path.to_string());
 
     // image_format is currently only used for the temp file suffix in the caller.
@@ -198,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_small_image_not_upscaled() {
+    fn resize_small_image_padded_to_label_size() {
         let img = image::RgbImage::new(100, 100);
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).unwrap();
@@ -206,8 +216,26 @@ mod tests {
         let config = test_config();
         let (out, _) = resize_image(&buf, &config).unwrap();
         let result_img = image::load_from_memory(&out).unwrap();
-        assert_eq!(result_img.width(), 100);
-        assert_eq!(result_img.height(), 100);
+        // Image is centered on a white background of exact label dimensions
+        assert_eq!(result_img.width(), config.label_width_px);
+        assert_eq!(result_img.height(), config.label_height_px);
+    }
+
+    #[test]
+    fn resize_large_image_thumbnail_then_padded() {
+        let mut img = image::RgbImage::new(3000, 4000);
+        for pixel in img.pixels_mut() {
+            *pixel = image::Rgb([50, 100, 150]);
+        }
+        let mut buf = Vec::new();
+        img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg).unwrap();
+
+        let config = test_config();
+        let (out, fmt) = resize_image(&buf, &config).unwrap();
+        assert_eq!(fmt, "jpeg");
+        let result_img = image::load_from_memory(&out).unwrap();
+        assert_eq!(result_img.width(), config.label_width_px);
+        assert_eq!(result_img.height(), config.label_height_px);
     }
 
     #[test]
@@ -221,7 +249,7 @@ mod tests {
         assert!(args.contains(&"3".to_string()));
         assert!(args.contains(&"-o".to_string()));
         assert!(args.contains(&"media=Custom.4x6in".to_string()));
-        assert!(args.contains(&"fit-to-page".to_string()));
+        assert!(args.contains(&"scaling=100".to_string()));
         assert!(args.contains(&"/tmp/test.png".to_string()));
     }
 

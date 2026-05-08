@@ -1,5 +1,6 @@
 # Build stage
-FROM rust:1.95-slim AS builder
+# Use the explicit bookworm tag (not slim) so glibc versions match the runtime stage.
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 

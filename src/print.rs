@@ -84,10 +84,17 @@ pub fn build_lp_args(
     let media_option = format!("media=Custom.{}x{}in", width_str, height_str);
     args.push("-o".to_string());
     args.push(media_option);
-    // scaling=100 tells CUPS to print at 100% — no pagination, no blank pages.
-    // The image is already exactly label dimensions, so this is the right choice.
+    // fit-to-page tells CUPS to scale the image to fit the media size.
+    // This is critical for roll label printers (DYMO): it forces exactly ONE
+    // page regardless of any missing/wrong DPI metadata in the image file.
+    // scaling=100 would use the image's intrinsic resolution, and since our
+    // JPEG/PNG has no JFIF/pHYs density set, CUPS defaults to 72 DPI, making
+    // 1200x1800px appear as ~17x25 inches — causing a trail of blank labels.
     args.push("-o".to_string());
-    args.push("scaling=100".to_string());
+    args.push("fit-to-page".to_string());
+    // Extra safety: force only page 1 even if the driver somehow sees more.
+    args.push("-o".to_string());
+    args.push("page-ranges=1".to_string());
     args.push(temp_path.to_string());
 
     // image_format is currently only used for the temp file suffix in the caller.
@@ -184,10 +191,10 @@ mod tests {
         assert_eq!(fmt, "jpeg");
         assert!(!out.is_empty());
 
-        // Verify dimensions are within bounds
+        // Image is padded to exact label dimensions
         let result_img = image::load_from_memory(&out).unwrap();
-        assert!(result_img.width() <= config.label_width_px);
-        assert!(result_img.height() <= config.label_height_px);
+        assert_eq!(result_img.width(), config.label_width_px);
+        assert_eq!(result_img.height(), config.label_height_px);
     }
 
     #[test]
@@ -205,8 +212,8 @@ mod tests {
         assert!(!out.is_empty());
 
         let result_img = image::load_from_memory(&out).unwrap();
-        assert!(result_img.width() <= config.label_width_px);
-        assert!(result_img.height() <= config.label_height_px);
+        assert_eq!(result_img.width(), config.label_width_px);
+        assert_eq!(result_img.height(), config.label_height_px);
     }
 
     #[test]
@@ -251,7 +258,8 @@ mod tests {
         assert!(args.contains(&"3".to_string()));
         assert!(args.contains(&"-o".to_string()));
         assert!(args.contains(&"media=Custom.4x6in".to_string()));
-        assert!(args.contains(&"scaling=100".to_string()));
+        assert!(args.contains(&"fit-to-page".to_string()));
+        assert!(args.contains(&"page-ranges=1".to_string()));
         assert!(args.contains(&"/tmp/test.png".to_string()));
     }
 

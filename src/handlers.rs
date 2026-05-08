@@ -220,7 +220,7 @@ pub async fn handle_image(bot: Bot, msg: Message, state: Arc<AppState>) -> Respo
     .await?;
 
     let largest = photos.last().unwrap();
-    let file = bot.get_file(&largest.file.id).await?;
+    let file = bot.get_file(largest.file.id.clone()).await?;
 
     let url = format!("https://api.telegram.org/file/bot{}/{}", bot.token(), file.path);
     let image_bytes = reqwest::get(&url)

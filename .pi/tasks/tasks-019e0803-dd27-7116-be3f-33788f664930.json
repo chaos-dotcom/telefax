@@ -41,13 +41,13 @@
       "id": "9",
       "subject": "Write unit tests for print module",
       "description": "Add #[cfg(test)] mod tests to src/print.rs covering: resize_image with generated RGB/RGBA test images verifying output format and dimensions, and build_lp_args verifying command construction with/without CUPS_SERVER_HOST and correct media option formatting.",
-      "status": "pending",
+      "status": "completed",
       "activeForm": "Writing print module unit tests",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778253068855,
-      "updatedAt": 1778253068855
+      "updatedAt": 1778254419465
     },
     {
       "id": "10",

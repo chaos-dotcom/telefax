@@ -164,6 +164,8 @@ mod tests {
             label_height_inches: 6.0,
             label_width_px: 1200,
             label_height_px: 1800,
+            rate_limit_override_start: None,
+            rate_limit_override_end: None,
         }
     }
 

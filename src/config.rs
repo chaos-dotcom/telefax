@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{NaiveDate, Utc};
 use log::{info, warn};
 use std::env;
 
@@ -17,6 +18,10 @@ pub struct Config {
     pub label_height_inches: f64,
     pub label_width_px: u32,
     pub label_height_px: u32,
+    /// Inclusive start date (YYYY-MM-DD) when rate limits are bypassed for guests.
+    pub rate_limit_override_start: Option<NaiveDate>,
+    /// Inclusive end date (YYYY-MM-DD) when rate limits are bypassed for guests.
+    pub rate_limit_override_end: Option<NaiveDate>,
 }
 
 impl Config {
@@ -51,6 +56,22 @@ impl Config {
 
         let max_copies = parse_positive_usize("MAX_COPIES", 100);
 
+        let rate_limit_override_start = parse_date("RATE_LIMIT_OVERRIDE_START");
+        let rate_limit_override_end = parse_date("RATE_LIMIT_OVERRIDE_END");
+        if let (Some(start), Some(end)) = (rate_limit_override_start, rate_limit_override_end) {
+            info!(
+                "Rate-limit override configured: {} to {} (inclusive)",
+                start, end
+            );
+            let today = Utc::now().date_naive();
+            if today >= start && today <= end {
+                info!(
+                    "Rate-limit override is ACTIVE today ({}) — guest cooldown is suspended",
+                    today
+                );
+            }
+        }
+
         let label_width_inches = parse_positive_f64("LABEL_WIDTH_INCHES", 4.0)?;
         let label_height_inches = parse_positive_f64("LABEL_HEIGHT_INCHES", 6.0)?;
 
@@ -81,11 +102,36 @@ impl Config {
             label_height_inches,
             label_width_px,
             label_height_px,
+            rate_limit_override_start,
+            rate_limit_override_end,
         })
     }
 
     pub fn is_authorized(&self, user_id: i64) -> bool {
         !self.allowed_user_ids.is_empty() && self.allowed_user_ids.contains(&user_id)
+    }
+
+    /// Returns true if today falls within the configured rate-limit override window.
+    pub fn is_rate_limit_override_active(&self) -> bool {
+        let today = chrono::Utc::now().date_naive();
+        match (self.rate_limit_override_start, self.rate_limit_override_end) {
+            (Some(start), Some(end)) => today >= start && today <= end,
+            _ => false,
+        }
+    }
+}
+
+fn parse_date(var: &str) -> Option<NaiveDate> {
+    let raw = env::var(var).ok()?;
+    match NaiveDate::parse_from_str(&raw, "%Y-%m-%d") {
+        Ok(d) => Some(d),
+        Err(_) => {
+            warn!(
+                "Invalid date format for {}: '{}'. Expected YYYY-MM-DD.",
+                var, raw
+            );
+            None
+        }
     }
 }
 
@@ -273,6 +319,8 @@ mod tests {
             label_height_inches: 6.0,
             label_width_px: 1200,
             label_height_px: 1800,
+            rate_limit_override_start: None,
+            rate_limit_override_end: None,
         };
 
         assert!(config.is_authorized(100));
@@ -293,8 +341,50 @@ mod tests {
             label_height_inches: 6.0,
             label_width_px: 1200,
             label_height_px: 1800,
+            rate_limit_override_start: None,
+            rate_limit_override_end: None,
         };
 
         assert!(!config.is_authorized(100));
+    }
+
+    #[test]
+    fn config_rate_limit_override_active() {
+        let today = Utc::now().date_naive();
+        let config = Config {
+            telegram_bot_token: "t".to_string(),
+            cups_printer_name: "p".to_string(),
+            cups_server_host: None,
+            allowed_user_ids: vec![100],
+            allow_guest_printing: true,
+            max_copies: 10,
+            label_width_inches: 4.0,
+            label_height_inches: 6.0,
+            label_width_px: 1200,
+            label_height_px: 1800,
+            rate_limit_override_start: Some(today),
+            rate_limit_override_end: Some(today),
+        };
+        assert!(config.is_rate_limit_override_active());
+    }
+
+    #[test]
+    fn config_rate_limit_override_inactive() {
+        let today = Utc::now().date_naive();
+        let config = Config {
+            telegram_bot_token: "t".to_string(),
+            cups_printer_name: "p".to_string(),
+            cups_server_host: None,
+            allowed_user_ids: vec![100],
+            allow_guest_printing: true,
+            max_copies: 10,
+            label_width_inches: 4.0,
+            label_height_inches: 6.0,
+            label_width_px: 1200,
+            label_height_px: 1800,
+            rate_limit_override_start: Some(today - chrono::Duration::days(10)),
+            rate_limit_override_end: Some(today - chrono::Duration::days(5)),
+        };
+        assert!(!config.is_rate_limit_override_active());
     }
 }

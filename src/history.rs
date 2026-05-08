@@ -142,6 +142,16 @@ pub fn can_print(user_id: i64, _username: Option<&str>, config: &Config, history
         return (true, None);
     }
 
+    // Rate-limit override (e.g. EMFcamp weekend) — skip cooldown entirely
+    if config.is_rate_limit_override_active() {
+        info!("[can_print] OVERRIDE ACTIVE — skipping rate-limit check for user {}", user_id);
+        if config.allow_guest_printing {
+            return (true, None);
+        }
+        warn!("[can_print] BLOCKED — guest printing disabled for user {}", user_id);
+        return (false, Some("Printing is restricted to authorized users only.".to_string()));
+    }
+
     // Rate limit check for non-authorized users
     if let Some(record) = history.get(&user_id) {
         let time_since_last_print = Utc::now() - record.last_print;
@@ -246,6 +256,8 @@ mod tests {
             label_height_inches: 6.0,
             label_width_px: 1200,
             label_height_px: 1800,
+            rate_limit_override_start: None,
+            rate_limit_override_end: None,
         }
     }
 
@@ -306,6 +318,47 @@ mod tests {
         let (allowed, reason) = can_print(200, None, &config, &history);
         assert!(allowed);
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn rate_limit_override_skips_cooldown() {
+        let mut config = test_config_with_users(vec![100], true);
+        // Set override to today
+        let today = chrono::Utc::now().date_naive();
+        config.rate_limit_override_start = Some(today);
+        config.rate_limit_override_end = Some(today);
+
+        let mut history = PrintHistory::new();
+        history.insert(
+            200,
+            UserPrintRecord {
+                last_print: Utc::now() - Duration::hours(1),
+                username: "test".to_string(),
+            },
+        );
+        let (allowed, reason) = can_print(200, None, &config, &history);
+        assert!(allowed);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn rate_limit_override_respects_guest_disabled() {
+        let mut config = test_config_with_users(vec![100], false);
+        let today = chrono::Utc::now().date_naive();
+        config.rate_limit_override_start = Some(today);
+        config.rate_limit_override_end = Some(today);
+
+        let mut history = PrintHistory::new();
+        history.insert(
+            200,
+            UserPrintRecord {
+                last_print: Utc::now() - Duration::hours(1),
+                username: "test".to_string(),
+            },
+        );
+        let (allowed, reason) = can_print(200, None, &config, &history);
+        assert!(!allowed);
+        assert_eq!(reason, Some("Printing is restricted to authorized users only.".to_string()));
     }
 
     #[test]

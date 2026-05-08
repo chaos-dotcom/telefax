@@ -1,27 +1,39 @@
-# Use a base image with Python and common tools
-FROM python:3.10-slim
+# Build stage
+FROM rust:1.85-slim AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Install CUPS client and other necessary packages
-# Add build-essential and libcups2-dev if pycups is needed later
+# Install dependencies needed for building (libssl-dev for reqwest, pkg-config)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifest and cache dependencies
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+# Build release binary
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install CUPS client and image libraries for runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cups-client \
     libcups2 \
-    # Add any other system dependencies needed by Pillow (e.g., for JPEG, PNG support)
     libjpeg62-turbo \
     libpng16-16 \
     libtiff6 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy the release binary from builder
+COPY --from=builder /app/target/release/telefax ./telefax
 
-# Copy the rest of the application code
-COPY bot.py .
 # Note: .env file is NOT copied. It should be provided at runtime via docker-compose env_file or similar.
 
-# Command to run the bot
-CMD ["python", "bot.py"]
+CMD ["./telefax"]

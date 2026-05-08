@@ -133,16 +133,19 @@ pub async fn save_print_history(history: &PrintHistory) {
 /// Checks if a user is allowed to print.
 /// Returns (true, None) if allowed.
 /// Returns (false, reason_message) if not allowed.
-pub fn can_print(user_id: i64, username: Option<&str>, config: &Config, history: &PrintHistory) -> (bool, Option<String>) {
+pub fn can_print(user_id: i64, _username: Option<&str>, config: &Config, history: &PrintHistory) -> (bool, Option<String>) {
     let is_authorized = config.is_authorized(user_id);
+    info!("[can_print] user_id={} authorized={} guest={:?}", user_id, is_authorized, config.allow_guest_printing);
 
     if is_authorized {
+        info!("[can_print] ALLOWED — user is authorized");
         return (true, None);
     }
 
     // Rate limit check for non-authorized users
     if let Some(record) = history.get(&user_id) {
         let time_since_last_print = Utc::now() - record.last_print;
+        info!("[can_print] Found history | last_print={} ago", format_wait_time(time_since_last_print));
         if time_since_last_print < UNAUTHORIZED_USER_PRINT_INTERVAL {
             let wait = UNAUTHORIZED_USER_PRINT_INTERVAL - time_since_last_print;
             let wait_str = format_wait_time(wait);
@@ -150,23 +153,24 @@ pub fn can_print(user_id: i64, username: Option<&str>, config: &Config, history:
                 "You have already printed recently. Please wait {} before printing again.",
                 wait_str
             );
-            info!(
-                "Rate limit check for user {} ({}): Still within cooldown. Time remaining: {:?}",
-                user_id,
-                username.unwrap_or("Unknown"),
-                wait
+            warn!(
+                "[can_print] BLOCKED — user {} still in cooldown | wait={}",
+                user_id, wait_str
             );
             return (false, Some(reason));
         }
+        info!("[can_print] Cooldown expired");
+    } else {
+        info!("[can_print] No history for user {}", user_id);
     }
 
     if config.allow_guest_printing {
+        info!("[can_print] ALLOWED — guest printing enabled");
         (true, None)
     } else {
         warn!(
-            "Guest printing disabled. Rejecting print for non-authorized user {} ({}).",
-            user_id,
-            username.unwrap_or("Unknown")
+            "[can_print] BLOCKED — guest printing disabled for user {}",
+            user_id
         );
         (
             false,

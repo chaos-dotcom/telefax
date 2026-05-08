@@ -35,14 +35,14 @@ pub async fn command_handler(
 
 pub async fn start(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResult<()> {
     let user = msg.from.as_ref().expect("Message has no sender");
-    info!("User {} ({}) entered /start command.", user.id, user.username.as_deref().unwrap_or("None"));
+    info!("[cmd:start] user_id={} username={}", user.id, user.username.as_deref().unwrap_or("None"));
 
     let mention = format!("<a href=\"tg://user?id={}\">{}</a>", user.id.0, user.full_name());
     let mut welcome = format!("Hi {}! Send me an image to print on the label printer.", mention);
 
     if state.config.cups_printer_name.is_empty() {
         welcome.push_str("\n\n<b>⚠️ Warning:</b> The printer is not configured. Printing is currently disabled. Please contact the administrator.");
-        warn!("Informing user {} via /start that printer is not configured.", user.id);
+        warn!("[cmd:start] Printer not configured — informing user {}", user.id);
     }
 
     if !state.config.is_authorized(user.id.0 as i64) {
@@ -62,7 +62,7 @@ pub async fn start(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResu
 
 pub async fn help(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResult<()> {
     let user = msg.from.as_ref().expect("Message has no sender");
-    info!("User {} ({}) entered /help command.", user.id, user.username.as_deref().unwrap_or("None"));
+    info!("[cmd:help] user_id={} username={}", user.id, user.username.as_deref().unwrap_or("None"));
 
     let is_authorized = state.config.is_authorized(user.id.0 as i64);
     let label_width_str = format_label_dim(state.config.label_width_inches);
@@ -123,12 +123,12 @@ pub async fn help(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResul
 pub async fn set_max_copies(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResult<()> {
     let user = msg.from.as_ref().expect("Message has no sender");
     if !state.config.is_authorized(user.id.0 as i64) {
-        warn!("Unauthorized /setmaxcopies attempt by user {} ({})", user.id, user.username.as_deref().unwrap_or("None"));
+        warn!("[cmd:setmaxcopies] UNAUTHORIZED user_id={} username={}", user.id, user.username.as_deref().unwrap_or("None"));
         bot.send_message(msg.chat.id, "Sorry, you are not authorized to use this command.").await?;
         return Ok(());
     }
 
-    let text = msg.text().unwrap_or("");
+    let text = msg.text().unwrap_or_default();
     let parts: Vec<&str> = text.split_whitespace().collect();
     if parts.len() != 2 {
         bot.send_message(msg.chat.id, "Usage: /setmaxcopies <number>\nExample: /setmaxcopies 50").await?;
@@ -138,7 +138,7 @@ pub async fn set_max_copies(bot: Bot, msg: Message, state: Arc<AppState>) -> Res
     match parts[1].parse::<usize>() {
         Ok(new_max) if new_max > 0 => {
             state.max_copies.store(new_max, Ordering::SeqCst);
-            info!("User {} set MAX_COPIES to {}", user.id, new_max);
+            info!("[cmd:setmaxcopies] user_id={} set MAX_COPIES to {}", user.id, new_max);
             bot.send_message(
                 msg.chat.id,
                 format!("Maximum copies per request set to <b>{}</b> for this session.", new_max),
@@ -160,37 +160,61 @@ pub async fn set_max_copies(bot: Bot, msg: Message, state: Arc<AppState>) -> Res
 pub async fn handle_image(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResult<()> {
     let user = msg.from.as_ref().expect("Message has no sender");
     let user_id = user.id.0 as i64;
+    let username = user.username.as_deref().unwrap_or("None");
+
+    info!("[handle_image] === START === user_id={} username={} chat_id={} message_id={}", user_id, username, msg.chat.id, msg.id);
 
     {
         let history = state.history.lock().await;
+        info!("[handle_image] History loaded: {} user(s)", history.len());
         let (is_allowed, reason) = can_print(user_id, user.username.as_deref(), &state.config, &history);
         drop(history);
         if !is_allowed {
-            warn!("Print rejected for user {} ({}). Reason: {:?}", user_id, user.username.as_deref().unwrap_or("None"), reason);
+            warn!("[handle_image] BLOCKED user_id={} reason={:?}", user_id, reason);
             let reply = format!("Sorry, you cannot print right now. {}", reason.unwrap_or_default());
             bot.send_message(msg.chat.id, reply).await?;
             return Ok(());
         }
+        info!("[handle_image] Auth/rate-limit check PASSED");
     }
 
     let photos = match msg.photo() {
         Some(p) if !p.is_empty() => p,
         _ => {
+            warn!("[handle_image] No photo in message from user {}", user_id);
             bot.send_message(msg.chat.id, "Please send an image file.").await?;
             return Ok(());
         }
     };
 
+    info!("[handle_image] Photo count={}", photos.len());
+    let largest = photos.last().unwrap();
+    info!(
+        "[handle_image] Largest photo | file_id={} width={} height={} file_size={:?}",
+        largest.file.id, largest.width, largest.height, largest.file.size
+    );
+
     if state.config.cups_printer_name.is_empty() {
-        error!("CUPS_PRINTER_NAME environment variable is not set.");
+        error!("[handle_image] CUPS_PRINTER_NAME is EMPTY — printing disabled");
         bot.send_message(msg.chat.id, "Printer is not configured. Please contact the administrator.").await?;
         return Ok(());
     }
+    info!(
+        "[handle_image] Config | printer='{}' server={:?} label={}x{}in ({}x{}px)",
+        state.config.cups_printer_name,
+        state.config.cups_server_host,
+        state.config.label_width_inches,
+        state.config.label_height_inches,
+        state.config.label_width_px,
+        state.config.label_height_px,
+    );
 
     let is_authorized = state.config.is_authorized(user_id);
     let caption = msg.caption();
     let max_copies = state.max_copies.load(Ordering::SeqCst);
+    info!("[handle_image] Parse | is_authorized={} caption={:?} max_copies={}", is_authorized, caption, max_copies);
     let requested_copies = parse_copies(caption, max_copies);
+    info!("[handle_image] Parse | requested_copies={}", requested_copies);
 
     let (copies_to_print, copies_message) = if is_authorized {
         let msg = if requested_copies == 1 {
@@ -201,12 +225,13 @@ pub async fn handle_image(bot: Bot, msg: Message, state: Arc<AppState>) -> Respo
         (requested_copies, msg)
     } else {
         if requested_copies > 1 {
-            info!("Unauthorized user {} requested {} copies, printing 1.", user_id, requested_copies);
+            info!("[handle_image] Guest user requested {} copies — forcing 1", requested_copies);
             (1, "1 copy (multiple copies ignored for guest users)".to_string())
         } else {
             (1, "1 copy".to_string())
         }
     };
+    info!("[handle_image] Will print | copies_to_print={} message='{}'", copies_to_print, copies_message);
 
     bot.send_message(
         msg.chat.id,
@@ -219,33 +244,46 @@ pub async fn handle_image(bot: Bot, msg: Message, state: Arc<AppState>) -> Respo
     )
     .await?;
 
-    let largest = photos.last().unwrap();
     let file = bot.get_file(largest.file.id.clone()).await?;
-
     let url = format!("https://api.telegram.org/file/bot{}/{}", bot.token(), file.path);
+    info!("[handle_image] Downloading image from Telegram | url_len={}", url.len());
+
     let image_bytes = reqwest::get(&url)
         .await
-        .map_err(|e| teloxide::errors::RequestError::Io(std::io::Error::other(e).into()))?
+        .map_err(|e| {
+            error!("[handle_image] Download GET failed: {}", e);
+            teloxide::errors::RequestError::Io(std::io::Error::other(e).into())
+        })?
         .bytes()
         .await
-        .map_err(|e| teloxide::errors::RequestError::Io(std::io::Error::other(e).into()))?
+        .map_err(|e| {
+            error!("[handle_image] Download body failed: {}", e);
+            teloxide::errors::RequestError::Io(std::io::Error::other(e).into())
+        })?
         .to_vec();
 
+    info!("[handle_image] Downloaded {} bytes from Telegram", image_bytes.len());
+
     let (resized, image_format) = match resize_image(&image_bytes, &state.config) {
-        Ok(r) => r,
+        Ok((buf, fmt)) => {
+            info!("[handle_image] Resize OK | format={} output_bytes={}", fmt, buf.len());
+            (buf, fmt)
+        }
         Err(e) => {
-            error!("Error resizing image: {}", e);
+            error!("[handle_image] Resize FAILED: {}", e);
             bot.send_message(msg.chat.id, "Failed to process the image.").await?;
             return Ok(());
         }
     };
 
+    info!(
+        "[handle_image] Spawning CUPS | printer='{}' copies={} format={}",
+        state.config.cups_printer_name, copies_to_print, image_format
+    );
+
     match print_image_cups(&resized, &state.config.cups_printer_name, copies_to_print, &image_format, &state.config).await {
         Ok(cups_msg) => {
-            info!(
-                "Successfully sent image to printer {} for user {} ({}), copies: {}",
-                state.config.cups_printer_name, user_id, user.username.as_deref().unwrap_or("None"), copies_to_print
-            );
+            info!("[handle_image] CUPS SUCCESS | stdout='{}'", cups_msg.trim());
             let reply = format!(
                 "Sent {} cop{} to printer! CUPS message: {}",
                 copies_to_print,
@@ -255,15 +293,17 @@ pub async fn handle_image(bot: Bot, msg: Message, state: Arc<AppState>) -> Respo
             bot.send_message(msg.chat.id, reply).await?;
 
             if state.config.allow_guest_printing && !is_authorized {
+                info!("[handle_image] Recording print for guest user {}", user_id);
                 record_print(user_id, user.username.as_deref(), &state.history).await;
             }
         }
         Err(e) => {
-            error!("Failed to print image for user {} ({}). Error: {}", user_id, user.username.as_deref().unwrap_or("None"), e);
+            error!("[handle_image] CUPS FAILURE | error='{}'", e);
             bot.send_message(msg.chat.id, format!("Failed to send to printer. Error: {}", e)).await?;
         }
     }
 
+    info!("[handle_image] === END === user_id={}", user_id);
     Ok(())
 }
 
@@ -285,7 +325,7 @@ fn parse_copies(caption: Option<&str>, max_copies: usize) -> usize {
             if (1..=max_copies).contains(&n) {
                 return n;
             } else {
-                warn!("User requested {} copies, which is outside the allowed range (1-{}). Defaulting to 1.", n, max_copies);
+                warn!("[parse_copies] Out of range: requested={} max={}", n, max_copies);
                 return 1;
             }
         }
@@ -295,12 +335,12 @@ fn parse_copies(caption: Option<&str>, max_copies: usize) -> usize {
             if (1..=max_copies).contains(&n) {
                 return n;
             } else {
-                warn!("User requested {} copies, which is outside the allowed range (1-{}). Defaulting to 1.", n, max_copies);
+                warn!("[parse_copies] Out of range: requested={} max={}", n, max_copies);
                 return 1;
             }
         }
 
-    info!("Caption '{}' did not match copy format. Defaulting to 1 copy.", caption);
+    info!("[parse_copies] No match for caption='{}', defaulting to 1", caption);
     1
 }
 

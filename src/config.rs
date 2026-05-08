@@ -145,6 +145,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_f64_valid() {
         set_env("TEST_F64", "4.5");
         assert_eq!(parse_positive_f64("TEST_F64", 4.0).unwrap(), 4.5);
@@ -152,6 +153,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_f64_invalid_uses_default() {
         set_env("TEST_F64", "not_a_number");
         assert_eq!(parse_positive_f64("TEST_F64", 6.0).unwrap(), 6.0);
@@ -159,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_f64_non_positive_uses_default() {
         set_env("TEST_F64", "-2.0");
         assert_eq!(parse_positive_f64("TEST_F64", 6.0).unwrap(), 6.0);
@@ -166,12 +169,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_f64_missing_uses_default() {
         remove_env("TEST_F64");
         assert_eq!(parse_positive_f64("TEST_F64", 4.0).unwrap(), 4.0);
     }
 
     #[test]
+    #[serial]
     fn parse_positive_usize_valid() {
         set_env("TEST_USIZE", "50");
         assert_eq!(parse_positive_usize("TEST_USIZE", 100), 50);
@@ -179,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_usize_invalid_uses_default() {
         set_env("TEST_USIZE", "abc");
         assert_eq!(parse_positive_usize("TEST_USIZE", 100), 100);
@@ -186,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_usize_zero_uses_default() {
         set_env("TEST_USIZE", "0");
         assert_eq!(parse_positive_usize("TEST_USIZE", 100), 100);
@@ -193,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_positive_usize_missing_uses_default() {
         remove_env("TEST_USIZE");
         assert_eq!(parse_positive_usize("TEST_USIZE", 100), 100);

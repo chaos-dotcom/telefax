@@ -22,7 +22,14 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    env_logger::init();
+
+    // Default to INFO in release builds so containers produce useful logs
+    // without requiring RUST_LOG to be set.  RUST_LOG still overrides.
+    let mut builder = env_logger::Builder::from_default_env();
+    if std::env::var("RUST_LOG").is_err() {
+        builder.filter_level(log::LevelFilter::Info);
+    }
+    builder.init();
 
     let config = match Config::from_env() {
         Ok(c) => c,

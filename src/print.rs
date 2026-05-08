@@ -6,11 +6,16 @@ use std::io::Cursor;
 use tokio::process::Command;
 
 pub fn resize_image(image_bytes: &[u8], config: &Config) -> Result<(Vec<u8>, String)> {
+    info!("[resize_image] Loading image from memory | input_bytes={}", image_bytes.len());
     let img = image::load_from_memory(image_bytes).context("Failed to load image from memory")?;
+    info!("[resize_image] Loaded | width={} height={} color={:?}", img.width(), img.height(), img.color());
 
     let resized = if img.width() > config.label_width_px || img.height() > config.label_height_px {
+        info!("[resize_image] Image exceeds label ({}x{}), thumbnailing to {}x{}",
+            img.width(), img.height(), config.label_width_px, config.label_height_px);
         img.thumbnail(config.label_width_px, config.label_height_px)
     } else {
+        info!("[resize_image] Image fits label, no resize needed");
         img
     };
 
@@ -22,6 +27,7 @@ pub fn resize_image(image_bytes: &[u8], config: &Config) -> Result<(Vec<u8>, Str
             | image::ColorType::La8
             | image::ColorType::La16
     );
+    info!("[resize_image] Output format | use_png={} color={:?}", use_png, resized.color());
 
     let mut output_buffer = Vec::new();
     let format = if use_png {
@@ -40,6 +46,7 @@ pub fn resize_image(image_bytes: &[u8], config: &Config) -> Result<(Vec<u8>, Str
         "jpeg".to_string()
     };
 
+    info!("[resize_image] Done | format={} output_bytes={}", format, output_buffer.len());
     Ok((output_buffer, format))
 }
 
@@ -90,6 +97,7 @@ pub async fn print_image_cups(
     config: &Config,
 ) -> Result<String> {
     let suffix = format!(".{}", image_format);
+    info!("[print_image_cups] Creating temp file | suffix={}", suffix);
     let mut temp_file = tempfile::Builder::new()
         .suffix(&suffix)
         .tempfile()
@@ -103,9 +111,10 @@ pub async fn print_image_cups(
         .path()
         .to_str()
         .context("Temporary file path is not valid UTF-8")?;
+    info!("[print_image_cups] Temp file | path={} size={}", path, image_buffer.len());
 
     let args = build_lp_args(printer_name, copies, image_format, config, path);
-    info!("Executing CUPS command: {}", args.join(" "));
+    info!("[print_image_cups] Spawning | {}", args.join(" "));
 
     let output = Command::new(&args[0])
         .args(&args[1..])
@@ -115,21 +124,15 @@ pub async fn print_image_cups(
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !stdout.is_empty() {
-        info!("CUPS Output: {}", stdout);
-    }
-    if !stderr.is_empty() {
-        info!("CUPS Error Output: {}", stderr);
-    }
+    let code = output.status.code().unwrap_or(-1);
 
     if output.status.success() {
+        info!("[print_image_cups] SUCCESS | exit={} stdout='{}' stderr='{}'", code, stdout.trim(), stderr.trim());
         Ok(stdout)
     } else {
-        let code = output.status.code().unwrap_or(-1);
         error!(
-            "CUPS printing failed. Return code: {}. Stderr: {}",
-            code, stderr
+            "[print_image_cups] FAILURE | exit={} stdout='{}' stderr='{}'",
+            code, stdout.trim(), stderr.trim()
         );
         anyhow::bail!("CUPS printing failed (code {}): {}", code, stderr)
     }

@@ -92,6 +92,17 @@ pub fn build_lp_args(
     // 1200x1800px appear as ~17x25 inches — causing a trail of blank labels.
     args.push("-o".to_string());
     args.push("fit-to-page".to_string());
+    // Force zero margins so the image fills the entire label.
+    // Without this CUPS uses default margins and fit-to-page scales down
+    // into the smaller printable area, leaving a white border.
+    args.push("-o".to_string());
+    args.push("page-left=0".to_string());
+    args.push("-o".to_string());
+    args.push("page-right=0".to_string());
+    args.push("-o".to_string());
+    args.push("page-top=0".to_string());
+    args.push("-o".to_string());
+    args.push("page-bottom=0".to_string());
     // Extra safety: force only page 1 even if the driver somehow sees more.
     args.push("-o".to_string());
     args.push("page-ranges=1".to_string());
@@ -259,6 +270,10 @@ mod tests {
         assert!(args.contains(&"-o".to_string()));
         assert!(args.contains(&"media=Custom.4x6in".to_string()));
         assert!(args.contains(&"fit-to-page".to_string()));
+        assert!(args.contains(&"page-left=0".to_string()));
+        assert!(args.contains(&"page-right=0".to_string()));
+        assert!(args.contains(&"page-top=0".to_string()));
+        assert!(args.contains(&"page-bottom=0".to_string()));
         assert!(args.contains(&"page-ranges=1".to_string()));
         assert!(args.contains(&"/tmp/test.png".to_string()));
     }

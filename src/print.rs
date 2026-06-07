@@ -10,51 +10,53 @@ pub fn resize_image(image_bytes: &[u8], config: &Config) -> Result<(Vec<u8>, Str
     let img = image::load_from_memory(image_bytes).context("Failed to load image from memory")?;
     info!("[resize_image] Loaded | width={} height={} color={:?}", img.width(), img.height(), img.color());
 
-    // Thumbnail if the image is larger than the label, otherwise keep original size
-    let thumb = if img.width() > config.label_width_px || img.height() > config.label_height_px {
-        info!("[resize_image] Image exceeds label ({}x{}), thumbnailing to {}x{}",
-            img.width(), img.height(), config.label_width_px, config.label_height_px);
-        img.thumbnail(config.label_width_px, config.label_height_px)
-    } else {
-        info!("[resize_image] Image fits label, using original size");
-        img
-    };
+    let target_w = config.label_width_px;
+    let target_h = config.label_height_px;
 
-    // Create a white background at EXACT label dimensions and center the image.
-    // This prevents CUPS / DYMO drivers from paginating or padding with blank
-    // labels when the source image is smaller than the label.
-    let bg_width = config.label_width_px;
-    let bg_height = config.label_height_px;
-    info!("[resize_image] Pasting onto {}x{} white background", bg_width, bg_height);
+    // Crop-to-fill: scale the image so it completely covers the label dimensions,
+    // then crop from the centre. This guarantees zero white margins regardless of
+    // the source image's aspect ratio.
+    let scale_x = target_w as f64 / img.width() as f64;
+    let scale_y = target_h as f64 / img.height() as f64;
+    let scale = scale_x.max(scale_y);
 
-    let paste_x = ((bg_width as i64 - thumb.width() as i64) / 2).max(0) as u32;
-    let paste_y = ((bg_height as i64 - thumb.height() as i64) / 2).max(0) as u32;
+    let cover_w = (img.width() as f64 * scale).ceil() as u32;
+    let cover_h = (img.height() as f64 * scale).ceil() as u32;
+    info!("[resize_image] Cover resize | scale={:.3} dims={}x{}", scale, cover_w, cover_h);
+
+    let resized = img.resize(cover_w, cover_h, image::imageops::FilterType::Lanczos3);
+
+    let crop_x = (resized.width().saturating_sub(target_w)) / 2;
+    let crop_y = (resized.height().saturating_sub(target_h)) / 2;
+    info!("[resize_image] Center crop | x={} y={} output={}x{}", crop_x, crop_y, target_w, target_h);
 
     let use_png = matches!(
-        thumb.color(),
+        resized.color(),
         image::ColorType::Rgba8
             | image::ColorType::Rgba16
             | image::ColorType::Rgba32F
             | image::ColorType::La8
             | image::ColorType::La16
     );
-    info!("[resize_image] Output format | use_png={} thumb_color={:?}", use_png, thumb.color());
+    info!("[resize_image] Output format | use_png={} color={:?}", use_png, resized.color());
 
     let mut output_buffer = Vec::new();
     let format = if use_png {
-        let mut background = image::RgbaImage::from_pixel(bg_width, bg_height, image::Rgba([255, 255, 255, 255]));
-        image::imageops::overlay(&mut background, &thumb.to_rgba8(), paste_x as i64, paste_y as i64);
-        background.write_to(&mut Cursor::new(&mut output_buffer), ImageFormat::Png)?;
+        let mut rgba = resized.to_rgba8();
+        let cropped = image::imageops::crop(&mut rgba, crop_x, crop_y, target_w, target_h);
+        let cropped_img = cropped.to_image();
+        cropped_img.write_to(&mut Cursor::new(&mut output_buffer), ImageFormat::Png)?;
         "png".to_string()
     } else {
-        let mut background = image::RgbImage::from_pixel(bg_width, bg_height, image::Rgb([255, 255, 255]));
-        image::imageops::overlay(&mut background, &thumb.to_rgb8(), paste_x as i64, paste_y as i64);
-        background.write_to(&mut Cursor::new(&mut output_buffer), ImageFormat::Jpeg)?;
+        let mut rgb = resized.to_rgb8();
+        let cropped = image::imageops::crop(&mut rgb, crop_x, crop_y, target_w, target_h);
+        let cropped_img = cropped.to_image();
+        cropped_img.write_to(&mut Cursor::new(&mut output_buffer), ImageFormat::Jpeg)?;
         "jpeg".to_string()
     };
 
     info!("[resize_image] Done | format={} output_bytes={} exact_dims={}x{}",
-        format, output_buffer.len(), bg_width, bg_height);
+        format, output_buffer.len(), target_w, target_h);
     Ok((output_buffer, format))
 }
 
@@ -84,17 +86,16 @@ pub fn build_lp_args(
     let media_option = format!("media=Custom.{}x{}in", width_str, height_str);
     args.push("-o".to_string());
     args.push(media_option);
-    // fit-to-page tells CUPS to scale the image to fit the media size.
-    // This is critical for roll label printers (DYMO): it forces exactly ONE
-    // page regardless of any missing/wrong DPI metadata in the image file.
-    // scaling=100 would use the image's intrinsic resolution, and since our
-    // JPEG/PNG has no JFIF/pHYs density set, CUPS defaults to 72 DPI, making
-    // 1200x1800px appear as ~17x25 inches — causing a trail of blank labels.
+    // scaling=100 + ppi=300 tells CUPS to print the image at its natural size
+    // assuming 300 DPI. Since our processed image is always exactly
+    // label_width_px × label_height_px (e.g. 1200×1800), this comes out to
+    // exactly 4×6 inches — one label, no scaling, no fitting to a smaller
+    // "printable area" (which is what fit-to-page does and why it left margins).
     args.push("-o".to_string());
-    args.push("fit-to-page".to_string());
-    // Force zero margins so the image fills the entire label.
-    // Without this CUPS uses default margins and fit-to-page scales down
-    // into the smaller printable area, leaving a white border.
+    args.push("scaling=100".to_string());
+    args.push("-o".to_string());
+    args.push("ppi=300".to_string());
+    // Force zero margins so the image starts at the physical edge.
     args.push("-o".to_string());
     args.push("page-left=0".to_string());
     args.push("-o".to_string());
@@ -103,7 +104,7 @@ pub fn build_lp_args(
     args.push("page-top=0".to_string());
     args.push("-o".to_string());
     args.push("page-bottom=0".to_string());
-    // Extra safety: force only page 1 even if the driver somehow sees more.
+    // Hard safety: never allow more than 1 page even if the driver miscalculates.
     args.push("-o".to_string());
     args.push("page-ranges=1".to_string());
     args.push(temp_path.to_string());
@@ -228,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_small_image_padded_to_label_size() {
+    fn resize_small_image_scaled_up_to_label_size() {
         let img = image::RgbImage::new(100, 100);
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).unwrap();
@@ -236,13 +237,13 @@ mod tests {
         let config = test_config();
         let (out, _) = resize_image(&buf, &config).unwrap();
         let result_img = image::load_from_memory(&out).unwrap();
-        // Image is centered on a white background of exact label dimensions
+        // Small image is scaled up and cropped to exact label dimensions
         assert_eq!(result_img.width(), config.label_width_px);
         assert_eq!(result_img.height(), config.label_height_px);
     }
 
     #[test]
-    fn resize_large_image_thumbnail_then_padded() {
+    fn resize_large_image_cover_cropped_to_label_size() {
         let mut img = image::RgbImage::new(3000, 4000);
         for pixel in img.pixels_mut() {
             *pixel = image::Rgb([50, 100, 150]);
@@ -269,7 +270,8 @@ mod tests {
         assert!(args.contains(&"3".to_string()));
         assert!(args.contains(&"-o".to_string()));
         assert!(args.contains(&"media=Custom.4x6in".to_string()));
-        assert!(args.contains(&"fit-to-page".to_string()));
+        assert!(args.contains(&"scaling=100".to_string()));
+        assert!(args.contains(&"ppi=300".to_string()));
         assert!(args.contains(&"page-left=0".to_string()));
         assert!(args.contains(&"page-right=0".to_string()));
         assert!(args.contains(&"page-top=0".to_string()));
